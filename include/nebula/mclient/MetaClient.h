@@ -52,6 +52,8 @@ class IdName;
 class EdgeItem;
 class ListEdgesReq;
 class ListEdgesResp;
+class TagItem;
+class ListTagsReq;
 
 }  // namespace cpp2
 }  // namespace meta
@@ -76,6 +78,8 @@ class MetaClient {
   std::pair<bool, std::vector<PartitionID>> getPartsFromCache(GraphSpaceID spaceId);
 
   std::pair<bool, HostAddr> getPartLeaderFromCache(GraphSpaceID spaceId, PartitionID partId);
+
+  std::pair<bool, std::vector<nebula::meta::cpp2::TagItem>> listTagSchemas(GraphSpaceID spaceId);
 
  private:
   bool loadData();

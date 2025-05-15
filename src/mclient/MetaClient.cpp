@@ -121,6 +121,22 @@ std::pair<bool, std::vector<SpaceIdName>> MetaClient::listSpaces() {
   return std::move(future).get();
 }
 
+std::pair<bool, std::vector<nebula::meta::cpp2::TagItem>> MetaClient::listTagSchemas(
+    GraphSpaceID spaceId) {
+  meta::cpp2::ListTagsReq req;
+  req.space_id_ref() = spaceId;
+  folly::Promise<std::pair<bool, std::vector<nebula::meta::cpp2::TagItem>>> promise;
+  auto future = promise.getFuture();
+  getResponse(
+      std::move(req),
+      [](auto client, auto request) { return client->future_listTags(request); },
+      [](meta::cpp2::ListTagsResp&& resp) -> decltype(auto) {
+        return std::make_pair(true, std::move(resp).get_tags());
+      },
+      std::move(promise));
+  return std::move(future).get();
+}
+
 std::pair<bool, std::vector<meta::cpp2::HostItem>> MetaClient::listHosts(
     meta::cpp2::ListHostType tp) {
   meta::cpp2::ListHostsReq req;
