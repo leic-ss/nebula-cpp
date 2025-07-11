@@ -60,6 +60,7 @@ class ListTagsReq;
 
 using SpaceIdName = std::pair<GraphSpaceID, std::string>;
 using SpaceNameIdMap = std::unordered_map<std::string, GraphSpaceID>;
+using SpaceIdNameMap = std::unordered_map<GraphSpaceID, std::string>;
 using SpaceEdgeNameTypeMap =
     std::unordered_map<std::pair<GraphSpaceID, std::string>, EdgeType, pair_hash>;
 
@@ -70,7 +71,11 @@ class MetaClient {
 
   ~MetaClient();
 
+  void tryMetaLeader();
+
   std::pair<bool, GraphSpaceID> getSpaceIdByNameFromCache(const std::string &name);
+
+  std::pair<bool, std::string> getSpaceNameByIdFromCache(GraphSpaceID space);
 
   std::pair<bool, EdgeType> getEdgeTypeByNameFromCache(GraphSpaceID spaceId,
                                                        const std::string &name);
@@ -81,12 +86,12 @@ class MetaClient {
 
   std::pair<bool, std::vector<nebula::meta::cpp2::TagItem>> listTagSchemas(GraphSpaceID spaceId);
 
+  std::pair<bool, std::vector<meta::cpp2::HostItem>> listHosts(meta::cpp2::ListHostType tp);
+
  private:
   bool loadData();
 
   std::pair<bool, std::vector<SpaceIdName>> listSpaces();
-
-  std::pair<bool, std::vector<meta::cpp2::HostItem>> listHosts(meta::cpp2::ListHostType tp);
 
   std::pair<bool, std::vector<meta::cpp2::EdgeItem>> listEdgeSchemas(GraphSpaceID spaceId);
 
@@ -106,10 +111,24 @@ class MetaClient {
                    RespGenerator respGen,
                    folly::Promise<std::pair<bool, Response>> pro);
 
+  template <class Request,
+            class RemoteFunc,
+            class RespGenerator,
+            class RpcResponse = typename std::result_of<RemoteFunc(
+                std::shared_ptr<meta::cpp2::MetaServiceAsyncClient>, Request)>::type::value_type,
+            class Response = typename std::result_of<RespGenerator(RpcResponse)>::type>
+  void getResponse2(HostAddr host,
+                   Request req,
+                   RemoteFunc remoteFunc,
+                   RespGenerator respGen,
+                   folly::Promise<std::pair<bool, Response>> pro);
+
  private:
   std::vector<HostAddr> metaAddrs_;
+  HostAddr leaderAddr_;
   MConfig mConfig_;
   SpaceNameIdMap spaceIndexByName_;
+  SpaceIdNameMap spaceIndexById_;
   SpaceEdgeNameTypeMap spaceEdgeIndexByName_;
   std::unordered_map<std::pair<GraphSpaceID, PartitionID>, HostAddr, pair_hash> spacePartLeaderMap_;
   std::unordered_map<GraphSpaceID, std::vector<PartitionID>> spacePartsMap_;

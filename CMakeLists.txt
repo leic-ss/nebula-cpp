@@ -22,6 +22,8 @@ cmake_minimum_required(VERSION 3.5.0)
 project("Nebula C++ Client" C CXX)
 set(PACKAGE_NAME "nebula-client")
 
+set(CMAKE_VERBOSE_MAKEFILE on)
+
 set(CMAKE_CXX_STANDARD 11)  # specify the C++ standard
 
 option(ENABLE_MODULE_UPDATE "Automatically update module" OFF)
@@ -72,6 +74,14 @@ nebula_add_shared_linker_flag(-rdynamic)
 nebula_add_shared_linker_flag(-Wl,--no-undefined)
 nebula_add_shared_linker_flag("-Wl,--version-script=${CMAKE_SOURCE_DIR}/exported-symbols.map")
 
+if (LIBEVENT_PATH)
+    message(STATUS "LIBEVENT_PATH: " ${LIBEVENT_PATH})
+else()
+    set(LIBEVENT_PATH ${PROJECT_SOURCE_DIR})
+    message(STATUS "LIBEVENT_PATH is not given, Default: " ${LIBEVENT_PATH})
+endif()
+
+include_directories(${LIBEVENT_PATH}/include)
 
 nebula_add_subdirectory(src)
 

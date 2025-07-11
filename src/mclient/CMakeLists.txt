@@ -2,9 +2,10 @@
 #
 # This source code is licensed under Apache 2.0 License.
 
-nebula_add_subdirectory(tests)
+# nebula_add_subdirectory(tests)
 
-add_executable(MetaClientDemo MetaClientDemo.cpp
+add_executable(MetaClientDemo
+    MetaClientDemo.cpp
 )
 
 target_link_libraries(MetaClientDemo

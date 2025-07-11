@@ -28,6 +28,9 @@ MetaClient::MetaClient(const std::vector<std::string>& metaAddrs, const MConfig&
   ioExecutor_ = std::make_shared<folly::IOThreadPoolExecutor>(std::thread::hardware_concurrency());
   clientsMan_ = std::make_shared<thrift::ThriftClientManager<meta::cpp2::MetaServiceAsyncClient>>(
       mConfig_.connTimeoutInMs_, mConfig_.enableSSL_, mConfig_.CAPath_);
+
+  tryMetaLeader();
+
   bool b = loadData();  // load data into cache
   if (!b) {
     LOG(ERROR) << "load data failed";
@@ -36,11 +39,46 @@ MetaClient::MetaClient(const std::vector<std::string>& metaAddrs, const MConfig&
 
 MetaClient::~MetaClient() = default;
 
+void MetaClient::tryMetaLeader()
+{
+  for (uint32_t i = 0; i < metaAddrs_.size(); i++) {
+    HostAddr host = metaAddrs_[i];
+    meta::cpp2::ListSpacesReq req;
+    folly::Promise<std::pair<bool, std::vector<SpaceIdName>>> promise;
+    auto future = promise.getFuture();
+    getResponse2(
+        host,
+        std::move(req),
+        [](auto client, auto request) { return client->future_listSpaces(request); },
+        [this](meta::cpp2::ListSpacesResp&& resp) -> decltype(auto) {
+          return std::make_pair(true, this->toSpaceIdName(resp.get_spaces()));
+        },
+        std::move(promise));
+    std::pair<bool, std::vector<SpaceIdName>> ret = std::move(future).get();
+
+    if (ret.first) {
+      leaderAddr_ = host;
+      LOG(INFO) << "leaderAddr_: " << leaderAddr_;
+      break;
+    }
+  }
+}
+
 std::pair<bool, GraphSpaceID> MetaClient::getSpaceIdByNameFromCache(const std::string& name) {
   auto it = spaceIndexByName_.find(name);
   if (it == spaceIndexByName_.end()) {
     LOG(ERROR) << "Get space id for " << name << " failed";
     return {false, -1};
+  }
+  return {true, it->second};
+}
+
+std::pair<bool, std::string> MetaClient::getSpaceNameByIdFromCache(GraphSpaceID space)
+{
+  auto it = spaceIndexById_.find(space);
+  if (it == spaceIndexById_.end()) {
+    LOG(ERROR) << "Get space id for " << space << " failed";
+    return {false, ""};
   }
   return {true, it->second};
 }
@@ -85,6 +123,8 @@ bool MetaClient::loadData() {
   for (auto space : ret.second) {
     GraphSpaceID spaceId = space.first;
     spaceIndexByName_.emplace(space.second, spaceId);
+    spaceIndexById_.emplace(spaceId, space.second);
+
     auto edgesRet = listEdgeSchemas(spaceId);
     if (!edgesRet.first) {
       LOG(ERROR) << "List edge schemas failed";
@@ -207,7 +247,49 @@ void MetaClient::getResponse(Request req,
                              RespGenerator respGen,
                              folly::Promise<std::pair<bool, Response>> pro) {
   auto* evb = DCHECK_NOTNULL(ioExecutor_)->getEventBase();
-  HostAddr host = metaAddrs_.back();
+  HostAddr host = leaderAddr_;
+  folly::via(evb,
+             [host,
+              evb,
+              req = std::move(req),
+              remoteFunc = std::move(remoteFunc),
+              respGen = std::move(respGen),
+              pro = std::move(pro),
+              this]() mutable {
+               auto client = clientsMan_->client(host, evb, false, mConfig_.clientTimeoutInMs_);
+               LOG(INFO) << "Send request to meta " << host;
+               remoteFunc(client, req)
+                   .via(evb)
+                   .then([host, respGen = std::move(respGen), pro = std::move(pro)](
+                             folly::Try<RpcResponse>&& t) mutable {
+                     // exception occurred during RPC
+                     if (t.hasException()) {
+                       LOG(ERROR) << "Send request to meta" << host << " failed";
+                       pro.setValue(std::make_pair(false, Response()));
+                       return;
+                     }
+                     auto&& resp = t.value();
+                     if (resp.get_code() == nebula::cpp2::ErrorCode::SUCCEEDED) {
+                       // succeeded
+                       pro.setValue(respGen(std::move(resp)));
+                       return;
+                     }
+                     pro.setValue(std::make_pair(false, Response()));
+                   });  // then
+             });        // via
+}
+
+template <typename Request,
+          typename RemoteFunc,
+          typename RespGenerator,
+          typename RpcResponse,
+          typename Response>
+void MetaClient::getResponse2(HostAddr host,
+                              Request req,
+                              RemoteFunc remoteFunc,
+                              RespGenerator respGen,
+                              folly::Promise<std::pair<bool, Response>> pro) {
+  auto* evb = DCHECK_NOTNULL(ioExecutor_)->getEventBase();
   folly::via(evb,
              [host,
               evb,

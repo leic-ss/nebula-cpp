@@ -20,19 +20,43 @@
 #include "rocksdb/sst_file_writer.h"
 #include "rocksdb/env.h"
 
-int32_t main() {
-    nebula::MetaClient client({"192.168.56.106:9559"});
+#include "nebula/mclient/MetaClient.h"
 
-    auto meta = client.getSpaceIdByNameFromCache("basketballplayer");
+#include <errno.h>
+#include <folly/ssl/Init.h>
+#include <folly/init/Init.h>
+#include <signal.h>
+#include <string.h>
+#include <thrift/lib/cpp2/server/ThriftServer.h>
+#include <glog/logging.h>
+
+#include <functional>
+#include <iostream>
+#include <unordered_map>
+
+DEFINE_string(meta_server_addrs,  "127.0.0.1:9559", "default meta server addr");
+DEFINE_int32(spaceid, 1, "default meta server http port");
+
+int32_t main(int argc, char* argv[]) {
+
+    folly::init(&argc, &argv, true);
+
+    std::vector<std::string> meta_server_addrs;
+    folly::split(",", FLAGS_meta_server_addrs, meta_server_addrs, true);
+
+    nebula::MetaClient client(meta_server_addrs);
+
+    auto meta = client.getSpaceNameByIdFromCache(FLAGS_spaceid);
 
     std::cout << meta.first << ":" << meta.second << std::endl;
 
-    auto tags = client.listTagSchemas(meta.second);
+    // auto tags = client.listTagSchemas(meta.second);
 
-    for (auto item : tags.second) {
-        std::cout << item.get_tag_name() << ":" << item.get_tag_id() << std::endl;
-    }
+    // for (auto item : tags.second) {
+    //     std::cout << item.get_tag_name() << ":" << item.get_tag_id() << std::endl;
+    // }
 
+    /*
     // 初始化SstFileWriter
     rocksdb::Options options;  // 可以进行配置以优化SST文件
     rocksdb::SstFileWriter sst_file_writer(rocksdb::EnvOptions(), options);
@@ -43,6 +67,7 @@ int32_t main() {
 
     // 完成SST文件的写入
     sst_file_writer.Finish();
+    */
 
     return 0;
 }

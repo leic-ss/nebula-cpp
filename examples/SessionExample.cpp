@@ -22,15 +22,16 @@ int main(int argc, char* argv[]) {
     pool.init({address}, nebula::Config{});
     auto session = pool.getSession("root", "nebula");
     if (!session.valid()) {
+        std::cout << "Exit with error code: -1" << std::endl;
         return -1;
     }
 
-    auto result = session.execute("SHOW HOSTS");
+    auto result = session.execute("SUBMIT JOB BALANCE DATA");
     if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
         std::cout << "Exit with error code: " << static_cast<int>(result.errorCode) << std::endl;
         return static_cast<int>(result.errorCode);
     }
-    std::cout << *result.data;
+    std::cout << "data: " << *result.data;
 
     std::atomic_bool complete{false};
     session.asyncExecute("SHOW HOSTS", [&complete](nebula::ExecutionResponse&& cbResult) {

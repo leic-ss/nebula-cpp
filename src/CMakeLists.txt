@@ -85,61 +85,11 @@ set(NEBULA_THIRD_PARTY_LIBRARIES
     -static-libstdc++
     -Wl,--no-undefined
     ${GETTIME_LIB}
+    ${LIBEVENT_PATH}/lib/libevent.a
     ${libatomic_link_flags}
 )
 
 nebula_add_subdirectory(interface)
-
-nebula_add_library(
-    nebula_graph_client SHARED
-    ${NEBULA_CLIENT_OBJS}
-    ${NEBULA_CLIENT_SOURCES}
-    ${NEBULA_COMMON_SOURCES}
-)
-
-nebula_add_library(
-    nebula_meta_client SHARED
-    ${NEBULA_MCLIENT_OBJS}
-    ${NEBULA_MCLIENT_SOURCES}
-    ${NEBULA_COMMON_SOURCES}
-)
-
-nebula_add_library(
-    nebula_storage_client SHARED
-    ${NEBULA_SCLIENT_OBJS}
-    ${NEBULA_SCLIENT_SOURCES}
-    ${NEBULA_COMMON_SOURCES}
-)
-
-target_link_libraries(
-    nebula_graph_client
-    ${NEBULA_THIRD_PARTY_LIBRARIES}
-)
-
-target_link_libraries(
-    nebula_meta_client
-    ${NEBULA_THIRD_PARTY_LIBRARIES}
-)
-
-target_link_libraries(
-    nebula_storage_client
-    ${NEBULA_THIRD_PARTY_LIBRARIES}
-)
-
-install(
-    TARGETS nebula_graph_client
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-
-install(
-    TARGETS nebula_meta_client
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-
-install(
-    TARGETS nebula_storage_client
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
 
 nebula_add_library(
     nebula_common_obj OBJECT
@@ -164,3 +114,5 @@ nebula_add_library(
 nebula_add_subdirectory(client)
 nebula_add_subdirectory(sclient)
 nebula_add_subdirectory(mclient)
+nebula_add_subdirectory(tools)
+nebula_add_subdirectory(examples)

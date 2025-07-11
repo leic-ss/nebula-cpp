@@ -41,6 +41,12 @@ struct HostAddr {
     return os.str();
   }
 
+  std::string hostString() const {
+    std::stringstream os;
+    os << host << ":" << port;
+    return os.str();
+  }
+
   bool operator==(const HostAddr& rhs) const;
 
   bool operator!=(const HostAddr& rhs) const;
