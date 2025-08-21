@@ -30,6 +30,9 @@ option(ENABLE_MODULE_UPDATE "Automatically update module" OFF)
 option(DISABLE_CLONE_COMMON "Automatically disable clone common module" OFF)
 
 add_definitions(-DNEBULA_HOME=${CMAKE_SOURCE_DIR})
+add_compile_options(-Wno-unused)
+add_compile_options(-O0)
+add_compile_options(-gdwarf-4 -gstrict-dwarf)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/nebula)

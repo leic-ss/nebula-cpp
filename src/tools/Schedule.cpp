@@ -38,7 +38,8 @@ DEFINE_string(db_path, "data/sysdb", "system data path");
 DEFINE_string(storage_http_addrs, "127.0.0.1:19779", "system data path");
 DEFINE_string(hdfs_job_dir, "hdfs://", "hdfs job dir");
 
-DEFINE_int32(thread_num, 6, "default process thread number");
+DEFINE_int32(thread_num, 9, "default process thread number");
+DEFINE_int32(download_wait_seconds, 60, "download wait seconds");
 
 static const std::string _sys_task_prefix_ = "_SYS_TASKS_";
 static const std::string _sys_begin_tag_ = ":";
@@ -212,7 +213,7 @@ void Schedule::taskstatus(struct evhttp_request *req)
         if (status.ok()) break;
     } while (false);
 
-    JsonParse(value, obj);
+    if (!value.empty()) JsonParse(value, obj);
     obj["key"] = key;
 
     do {
@@ -254,7 +255,6 @@ void Schedule::tasklist(struct evhttp_request *req)
     if (params.find("state") != params.end()) {
         start_tag = params["state"];
         end_tag = std::to_string( atoi( params["state"].c_str() ) + 1);
-        return ;
     }
 
     rocksdb::Slice startkey( _sys_task_prefix_ + start_tag );
@@ -282,7 +282,36 @@ void Schedule::tasklist(struct evhttp_request *req)
 
         nlohmann::json obj;
         JsonParse(value, obj);
-        obj["key"] = std::string(scan_it_->key().data(), scan_it_->key().size());
+        std::string key = std::string(scan_it_->key().data(), scan_it_->key().size());
+
+        obj["key"] = key;
+        std::string jobid = key.substr(startkey.size());
+
+        do {
+            if (obj.contains("succ")) break;
+
+            std::unique_lock<std::mutex> lk(mtx);
+
+            auto iter1 = jobStatus.find(jobid);
+            if (iter1 == jobStatus.end()) {
+                LOG(ERROR) << "task " << jobid << " not exist";
+                break;
+            }
+            auto& jobstatus = iter1->second;
+
+            uint32_t succ = 0;
+            uint32_t fail = 0;
+            uint32_t total = 0;
+            for (auto& item : jobstatus) {
+                succ += item.second.succ;
+                fail += item.second.fail;
+                total += item.second.total;
+            }
+
+            obj["succ"] = succ;
+            obj["fail"] = fail;
+            obj["total"] = total;
+        } while(false);
 
         json_objs.push_back( obj );
 
@@ -333,9 +362,10 @@ void Schedule::taskdelete(struct evhttp_request *req)
     }
 
     rocksdb::Status status;
+    std::string key;
     std::string value;
     do {
-        std::string key = _sys_task_prefix_ + std::to_string(JOB_STATE_INITIAL) + taskid;
+        key = _sys_task_prefix_ + std::to_string(JOB_STATE_INITIAL) + taskid;
         status = sysdb->Get(rocksdb::ReadOptions(), key, &value);
         if (status.ok()) break;
 
@@ -347,6 +377,10 @@ void Schedule::taskdelete(struct evhttp_request *req)
         status = sysdb->Get(rocksdb::ReadOptions(), key, &value);
         if (status.ok()) break;
     } while (false);
+
+    if (status.ok()) {
+        status = sysdb->Delete(rocksdb::WriteOptions(), key);
+    }
 
     nlohmann::json resp_obj;
     nlohmann::json obj;
@@ -450,7 +484,7 @@ std::string Schedule::pickInitialJob()
 
     scan_it_->SeekToFirst();
     if (!scan_it_->Valid()) {
-        LOG(WARNING) << "scheduleInitialJob no Initial job!";
+        // LOG(WARNING) << "scheduleInitialJob no Initial job!";
         delete scan_it_;
         return jobid;
     }
@@ -535,7 +569,7 @@ void Schedule::incrSucc(const std::string& jobid, std::string spacename, uint32_
 
         nlohmann::json obj;
         JsonParse(value, obj);
-        obj["done_time"] = gTimeConvert( gGetCurrentUs()/1000000 );;
+        obj["done_time"] = gTimeConvert( gGetCurrentUs()/1000000 );
         obj["state"] = "Done";
         obj["succ"] = succ_count;
         obj["fail"] = fail_count;
@@ -589,7 +623,7 @@ void Schedule::incrFail(const std::string& jobid, std::string spacename, uint32_
 
         nlohmann::json obj;
         JsonParse(value, obj);
-        obj["done_time"] = gGetCurrentUs()/1000000;
+        obj["done_time"] = gTimeConvert( gGetCurrentUs()/1000000 );
         obj["state"] = "Done";
         obj["succ"] = succ_count;
         obj["fail"] = fail_count;
@@ -621,13 +655,13 @@ void Schedule::incrTotal(const std::string& jobid, std::string spacename, uint32
     }
 }
 
-void Schedule::scheduleJob(const std::string& jobid)
+bool Schedule::scheduleJob(const std::string& jobid)
 {
     std::vector<std::string> storage_http_addrs;
     folly::split(",", FLAGS_storage_http_addrs, storage_http_addrs, true);
     if (storage_http_addrs.empty()) {
         LOG(ERROR) << "storage_http_addrs is empty!";
-        return ;
+        return false;
     }
 
     std::string hdfspath = "/list?" + std::string("hdfspath=") + FLAGS_hdfs_job_dir + "/" + jobid;
@@ -637,7 +671,7 @@ void Schedule::scheduleJob(const std::string& jobid)
 
     if (!resp || resp->status != httplib::StatusCode::OK_200) {
         LOG(ERROR) << httplib::to_string(resp.error());
-        return ;
+        return false;
     }
 
     nlohmann::json obj;
@@ -648,13 +682,13 @@ void Schedule::scheduleJob(const std::string& jobid)
 
     if (obj["code"] != 0) {
         LOG(ERROR) << "list failed! " << obj["resp"];
-        return ;
+        return false;
     }
 
     nlohmann::json resp_obj = obj["resp"];
     if (resp_obj["dirs"].is_null() || resp_obj["dirs"].empty()) {
         LOG(ERROR) << "dirs is empty!";
-        return ;
+        return false;
     }
 
     std::vector<std::string> meta_server_addrs;
@@ -665,7 +699,7 @@ void Schedule::scheduleJob(const std::string& jobid)
     auto hostsRet = mclient.listHosts(nebula::meta::cpp2::ListHostType::ALLOC);
     if (!hostsRet.first) {
         LOG(ERROR) << "List hosts failed";
-        return ;
+        return false;
     }
 
     // preWorker(jobid, resp_obj["dirs"]);
@@ -756,7 +790,7 @@ void Schedule::scheduleJob(const std::string& jobid)
     }
     
 
-    return ;
+    return true;
 }
 
 void Schedule::ingestFiles(JobTask task)
@@ -786,8 +820,9 @@ void Schedule::ingestFiles(JobTask task)
 
         std::string filepath = obj["resp"];
 
+        uint32_t wait_times = FLAGS_download_wait_seconds;
         bool exist = false;
-        for (uint32_t i = 0; i < 30; i++) {
+        for (uint32_t i = 0; i < wait_times; i++) {
             usleep(500*1000);
             hdfsdir = "/check?filepath=" + filepath;
             response = client.Get(hdfsdir);
@@ -840,43 +875,68 @@ void Schedule::Run()
 
     while (true) {
 
-        sleep(10);
-
+        sleep(5);
 
         std::string jobid = pickRunningJob();
         if (!jobid.empty()) continue;
 
         jobid = pickInitialJob();
-        if (!jobid.empty()) {
 
-            {
-                std::unique_lock<std::mutex> lk(mtx);
-                std::unordered_map<std::string, JobStat> status;
-                jobStatus.emplace(jobid, status);
-            }
-
-            scheduleJob( jobid );
+        do {
+            if (jobid.empty()) break;
 
             std::string value;
             std::string oldkey = _sys_task_prefix_ + std::to_string(JOB_STATE_INITIAL) + jobid;
             rocksdb::Status status = sysdb->Get(rocksdb::ReadOptions(), oldkey, &value);
-            if (status.ok()) {
 
-                rocksdb::WriteBatch batch;
-                batch.Delete(oldkey);
+            if (!status.ok()) break;
 
-                std::string newkey = _sys_task_prefix_ + std::to_string(JOB_STATE_RUNNING) + jobid;
+            rocksdb::WriteBatch batch1;
+            batch1.Delete(oldkey);
 
-                nlohmann::json obj;
-                JsonParse(value, obj);
-                obj["running_time"] = gTimeConvert( gGetCurrentUs()/1000000 );;
-                obj["state"] = "Running";
+            std::string newkey = _sys_task_prefix_ + std::to_string(JOB_STATE_RUNNING) + jobid;
 
-                batch.Put(newkey, obj.dump());
+            nlohmann::json obj;
+            JsonParse(value, obj);
+            obj["running_time"] = gTimeConvert( gGetCurrentUs()/1000000 );;
+            obj["state"] = "Running";
 
-                status = sysdb->Write(rocksdb::WriteOptions(), &batch);
+            batch1.Put(newkey, obj.dump());
+
+            status = sysdb->Write(rocksdb::WriteOptions(), &batch1);
+            if (!status.ok()) break;
+
+            {
+                std::unique_lock<std::mutex> lk(mtx);
+                std::unordered_map<std::string, JobStat> stats;
+                jobStatus.emplace(jobid, stats);
             }
-        }
+
+            bool ret = scheduleJob( jobid );
+
+            rocksdb::WriteBatch batch2;
+
+            obj["ingest_time"] = gTimeConvert( gGetCurrentUs()/1000000 );;
+
+            if (!ret) {
+                oldkey = newkey;
+                batch2.Delete(oldkey);
+
+                newkey = _sys_task_prefix_ + std::to_string(JOB_STATE_DONE) + jobid;
+
+                obj["done_time"] = gTimeConvert( gGetCurrentUs()/1000000 );
+                obj["succ"] = 0;
+                obj["fail"] = 0;
+                obj["total"] = 0;
+                obj["state"] = "Done";
+            }
+
+            batch2.Put(newkey, obj.dump());
+
+            status = sysdb->Write(rocksdb::WriteOptions(), &batch2);
+
+            if (!status.ok()) break;
+        } while (false);
     }
 
 }

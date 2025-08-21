@@ -51,7 +51,7 @@ private:
     std::string pickInitialJob();
     std::string pickRunningJob();
 
-    void scheduleJob(const std::string& jobid);
+    bool scheduleJob(const std::string& jobid);
 
     void ingestFiles(JobTask task);
     // void ingestFiles(std::string jobid, uint32_t spaceid, std::string spacename, uint32_t partid, nebula::meta::cpp2::HostItem hostitem, nlohmann::json files);
