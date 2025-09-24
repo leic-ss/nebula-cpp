@@ -18,6 +18,8 @@
 #include <functional>
 #include <iostream>
 #include <unordered_map>
+#include <set>
+#include <algorithm>
 
 #include "rocksdb/db.h"
 #include "rocksdb/sst_file_writer.h"
@@ -44,11 +46,18 @@ DEFINE_int32(download_wait_seconds, 60, "download wait seconds");
 static const std::string _sys_task_prefix_ = "_SYS_TASKS_";
 static const std::string _sys_begin_tag_ = ":";
 static const std::string _sys_end_tag_ = ";";
+static const std::string _sys_meta_prefix_ = "_SYS_META_";
 
 static const uint32_t JOB_STATE_INITIAL = 0;
 static const uint32_t JOB_STATE_RUNNING = 1;
 static const uint32_t JOB_STATE_DONE = 2;
 static const uint32_t JOB_STATE_END = 3;
+
+static const uint32_t META_EDGE_1 = 0;
+static const uint32_t META_EDGE_2 = 1;
+static const uint32_t META_TAG_1 = 2;
+static const uint32_t META_TAG_2 = 3;
+
 
 static uint64_t gGetCurrentUs()
 {
@@ -79,6 +88,22 @@ static std::string gTimeConvert(time_t ts)
     str.append(std::to_string(Second));
 
     return str;
+}
+
+static std::vector<std::string> tokenize(const std::string& src, const std::string& delim)
+{
+    std::vector<std::string> ret;
+    size_t last = 0;
+    size_t pos = src.find(delim, last);
+    while (pos != std::string::npos) {
+        ret.push_back( src.substr(last, pos - last) );
+        last = pos + delim.size();
+        pos = src.find(delim, last);
+    }
+    if (last < src.size()) {
+        ret.push_back( src.substr(last) );
+    }
+    return std::move(ret);
 }
 
 // static std::string timeConvertDay(time_t ts)
@@ -112,6 +137,12 @@ void Schedule::register_http_callbacks()
     adminserver.reg_handler("/api/v1/hdfs/list", std::bind(&Schedule::hdfslist,
                             this,
                             std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/relation/create", std::bind(&Schedule::relationcreate,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/relation/list", std::bind(&Schedule::relationlist,
+                            this,
+                            std::placeholders::_1));
 }
 
 bool Schedule::JsonParse(const std::string& json_str, nlohmann::json& json_obj)
@@ -139,8 +170,8 @@ Schedule::~Schedule()
 void Schedule::taskschedule(struct evhttp_request *req)
 {
     std::string mime_type("application/json; charset=utf-8");
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "0");
-    evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
     if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
         AdminServer::http_error(req, 400, "not a post request!");
@@ -162,6 +193,14 @@ void Schedule::taskschedule(struct evhttp_request *req)
     LOG(WARNING) << content;
 
     uint32_t taskid = json_obj["execRecord"].value("taskScheRecordId", 0);
+
+    std::string task_status = json_obj.value("status", "SUCCESS");
+    if (task_status == "FAILED") {
+        LOG(ERROR) << "Failed Task " << taskid;
+        AdminServer::http_error(req, 400, "Failed Task");
+        return ;
+    }
+
     std::string db_key = _sys_task_prefix_ + std::to_string(JOB_STATE_INITIAL) + std::to_string(taskid);
 
     nlohmann::json obj;
@@ -183,11 +222,158 @@ void Schedule::taskschedule(struct evhttp_request *req)
     AdminServer::http_ok(req, obj.dump());
 }
 
+// {"srctag": "tag1", "dsttag": "tag2", "edges": ["edge1", "edge2"]}
+void Schedule::relationcreate(struct evhttp_request *req)
+{
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
+        AdminServer::http_error(req, 400, "not a post request!");
+        return ;
+    }
+
+    std::string content = AdminServer::read_content(req);
+    if (content.empty()) {
+        AdminServer::http_error(req, 400, "empty content in post request!");
+        return ;
+    }
+
+    nlohmann::json json_obj;
+    if (!JsonParse(content, json_obj)) {
+        AdminServer::http_error(req, 400, "invalid json format!");
+        return ;
+    }
+
+    LOG(WARNING) << "relationcreate: " << content;
+
+    std::string srcnode = json_obj.value("srcnode", "");
+    std::string dstnode = json_obj.value("dstnode", "");
+    int32_t rankval = json_obj.value("rankval", 0);
+
+    std::vector<std::string> nodes;
+    nodes.push_back(srcnode);
+    nodes.push_back(dstnode);
+    std::sort(nodes.begin(), nodes.end());
+
+    std::string val = std::to_string(rankval) + _sys_begin_tag_ + srcnode + _sys_begin_tag_ + dstnode;
+
+    nlohmann::json edges = json_obj["edges"];
+
+    rocksdb::WriteBatch batch;
+    for (std::string edge : edges) {
+        // std::string edge = obj.value("edge", "");
+
+        std::string key1 = _sys_meta_prefix_ + std::to_string(META_EDGE_1) + edge + _sys_begin_tag_ + nodes[0] + _sys_begin_tag_ + nodes[1];
+        std::string key2 = _sys_meta_prefix_ + std::to_string(META_EDGE_2) + nodes[0] + _sys_begin_tag_ + nodes[1] + _sys_begin_tag_ + edge;
+
+        std::string key3 = _sys_meta_prefix_ + std::to_string(META_TAG_1) + nodes[0] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[1];
+        std::string key4 = _sys_meta_prefix_ + std::to_string(META_TAG_1) + nodes[1] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[0];
+
+        batch.Put(key1, val);
+        batch.Put(key2, val);
+        batch.Put(key3, val);
+        batch.Put(key4, val);
+    }
+
+    auto status = sysdb->Write(rocksdb::WriteOptions(), &batch);
+    if (!status.ok()) {
+        AdminServer::http_error(req, 400, "rocksdb write failed! err: " + status.ToString());
+        return ;
+    }
+
+    AdminServer::http_error(req, 200, "relation create success!");
+}
+
+void Schedule::relationlist(struct evhttp_request *req)
+{
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    // AdminServer::Http_Map params = AdminServer::parse_params(req);
+
+    rocksdb::Slice startkey( _sys_meta_prefix_ + std::to_string(META_EDGE_1) );
+    rocksdb::Slice endkey( _sys_meta_prefix_ + std::to_string(META_EDGE_2) );
+
+    rocksdb::ReadOptions scan_read_options;
+    scan_read_options.fill_cache = false; // not fill cache
+    scan_read_options.iterate_lower_bound = &startkey;
+    scan_read_options.iterate_upper_bound = &endkey;
+
+    rocksdb::Iterator* scan_it_ = sysdb->NewIterator(scan_read_options);
+    if (!scan_it_) {
+        LOG(ERROR) << "NewIterator failed!";
+        AdminServer::http_error(req, 400, "NewIterator failed!");
+        return ;
+    }
+
+    nlohmann::json edge_objs = nlohmann::json::array();
+    nlohmann::json tag_objs;
+
+    scan_it_->SeekToFirst();
+    while(scan_it_->Valid()) {
+        std::string key( scan_it_->key().data(), scan_it_->key().size() );
+        std::string value( scan_it_->value().data(), scan_it_->value().size() );
+
+        std::vector<std::string> vec1 = tokenize(key.substr(startkey.size()), _sys_begin_tag_);
+        std::vector<std::string> vec2 = tokenize(value, _sys_begin_tag_);
+
+        nlohmann::json obj;
+        obj["edge"] = vec1[0];
+        nlohmann::json obj_arr = nlohmann::json::array();
+        obj_arr.push_back(vec2[1]);
+        obj_arr.push_back(vec2[2]);
+        obj["tags"] = obj_arr;
+        obj["rank"] = atoi( vec2[0].c_str() );
+        obj["desc"] = vec2[1] + " -> " + vec2[2];
+
+        edge_objs.push_back( obj );
+
+        {
+            if (tag_objs[vec2[1]].is_null()) {
+                tag_objs[vec2[1]] = nlohmann::json::array();
+            }
+
+            nlohmann::json tag_obj;
+            tag_obj["tag"] = vec2[2];
+            tag_obj["edge"] = vec1[0];
+            tag_obj["rank"] = atoi( vec2[0].c_str() );
+            tag_obj["direction"] = "->";
+            tag_objs[vec2[1]].push_back(tag_obj);
+        }
+
+        if (vec2[1] != vec2[2]) {
+            if (tag_objs[vec2[2]].is_null()) {
+                tag_objs[vec2[2]] = nlohmann::json::array();
+            }
+
+            nlohmann::json tag_obj;
+            tag_obj["tag"] = vec2[1];
+            tag_obj["edge"] = vec1[0];
+            tag_obj["rank"] = atoi( vec2[0].c_str() );
+            tag_obj["direction"] = "<-";
+            tag_objs[vec2[2]].push_back(tag_obj);
+        }
+
+        scan_it_->Next();
+    }
+    delete scan_it_;
+
+    nlohmann::json resp_obj;
+    resp_obj["code"] = 0;
+    resp_obj["edges"] = edge_objs;
+    resp_obj["tags"] = tag_objs;
+
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
 void Schedule::taskstatus(struct evhttp_request *req)
 {
     std::string mime_type("application/json; charset=utf-8");
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "0");
-    evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
     AdminServer::Http_Map params = AdminServer::parse_params(req);
     if (params.find("taskid") == params.end()) {
@@ -245,8 +431,8 @@ void Schedule::taskstatus(struct evhttp_request *req)
 void Schedule::tasklist(struct evhttp_request *req)
 {
     std::string mime_type("application/json; charset=utf-8");
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "0");
-    evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
     AdminServer::Http_Map params = AdminServer::parse_params(req);
 
@@ -327,8 +513,8 @@ void Schedule::tasklist(struct evhttp_request *req)
 void Schedule::taskdelete(struct evhttp_request *req)
 {
     std::string mime_type("application/json; charset=utf-8");
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "0");
-    evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
     if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
         AdminServer::http_error(req, 400, "not a post request!");
@@ -399,8 +585,8 @@ void Schedule::taskdelete(struct evhttp_request *req)
 void Schedule::hdfslist(struct evhttp_request *req)
 {
     std::string mime_type("application/json; charset=utf-8");
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "0");
-    evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
     AdminServer::Http_Map params = AdminServer::parse_params(req);
 

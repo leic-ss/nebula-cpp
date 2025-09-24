@@ -185,6 +185,7 @@ void AdminServer::handle(struct evhttp_request *req)
     auto iter = cbs.find(uri_path);
     if (iter != cbs.end()) {
         // log_info("AdminServer match callback for uri_path[%s]", uri_path.c_str());
+        LOG(INFO) << "AdminServer match callback for uri_path: " << uri_path;
 
         // Http_Map params = parse_params(req);
         // for (auto& param : params) {

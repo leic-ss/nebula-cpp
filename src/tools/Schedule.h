@@ -63,6 +63,8 @@ private:
 private:
     void register_http_callbacks();
     void taskschedule(struct evhttp_request *req);
+    void relationcreate(struct evhttp_request *req);
+    void relationlist(struct evhttp_request *req);
     void taskstatus(struct evhttp_request *req);
     void taskdelete(struct evhttp_request *req);
     void tasklist(struct evhttp_request *req);
