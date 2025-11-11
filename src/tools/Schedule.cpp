@@ -30,6 +30,14 @@
 #include "Schedule.h"
 #include "cpphttplib/httplib.h"
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+#include <nebula/client/Config.h>
+#include <nebula/client/ConnectionPool.h>
+#include <common/Init.h>
+
 static void printHelp(const char *prog) {
     fprintf(stderr, "%s --datafile <data_file>\n", prog);
 }
@@ -143,6 +151,15 @@ void Schedule::register_http_callbacks()
     adminserver.reg_handler("/api/v1/relation/list", std::bind(&Schedule::relationlist,
                             this,
                             std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/subgraph/clear", std::bind(&Schedule::subgraphclear,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/subgraph/newmeta", std::bind(&Schedule::subgraphmeta,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/subgraph/newdata", std::bind(&Schedule::subgraphdata,
+                            this,
+                            std::placeholders::_1));
 }
 
 bool Schedule::JsonParse(const std::string& json_str, nlohmann::json& json_obj)
@@ -248,6 +265,7 @@ void Schedule::relationcreate(struct evhttp_request *req)
 
     LOG(WARNING) << "relationcreate: " << content;
 
+    std::string space = json_obj.value("space", "");
     std::string srcnode = json_obj.value("srcnode", "");
     std::string dstnode = json_obj.value("dstnode", "");
     int32_t rankval = json_obj.value("rankval", 0);
@@ -265,11 +283,16 @@ void Schedule::relationcreate(struct evhttp_request *req)
     for (std::string edge : edges) {
         // std::string edge = obj.value("edge", "");
 
-        std::string key1 = _sys_meta_prefix_ + std::to_string(META_EDGE_1) + edge + _sys_begin_tag_ + nodes[0] + _sys_begin_tag_ + nodes[1];
-        std::string key2 = _sys_meta_prefix_ + std::to_string(META_EDGE_2) + nodes[0] + _sys_begin_tag_ + nodes[1] + _sys_begin_tag_ + edge;
+        std::string key1 = _sys_meta_prefix_ + space + std::to_string(META_EDGE_1) + edge + _sys_begin_tag_ + nodes[0] + _sys_begin_tag_ + nodes[1];
+        std::string key2 = _sys_meta_prefix_ + space + std::to_string(META_EDGE_2) + nodes[0] + _sys_begin_tag_ + nodes[1] + _sys_begin_tag_ + edge;
 
-        std::string key3 = _sys_meta_prefix_ + std::to_string(META_TAG_1) + nodes[0] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[1];
-        std::string key4 = _sys_meta_prefix_ + std::to_string(META_TAG_1) + nodes[1] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[0];
+        std::string key3 = _sys_meta_prefix_ + space + std::to_string(META_TAG_1) + nodes[0] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[1];
+        std::string key4 = _sys_meta_prefix_ + space + std::to_string(META_TAG_1) + nodes[1] + _sys_begin_tag_ + edge + _sys_begin_tag_ + nodes[0];
+
+        LOG(WARNING) << key1;
+        LOG(WARNING) << key2;
+        LOG(WARNING) << key3;
+        LOG(WARNING) << key4;
 
         batch.Put(key1, val);
         batch.Put(key2, val);
@@ -292,10 +315,20 @@ void Schedule::relationlist(struct evhttp_request *req)
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
 
-    // AdminServer::Http_Map params = AdminServer::parse_params(req);
+    AdminServer::Http_Map params = AdminServer::parse_params(req);
+    if (params.find("space") == params.end()) {
+        AdminServer::http_error(req, 400, "missing space");
+        return ;
+    }
 
-    rocksdb::Slice startkey( _sys_meta_prefix_ + std::to_string(META_EDGE_1) );
-    rocksdb::Slice endkey( _sys_meta_prefix_ + std::to_string(META_EDGE_2) );
+    std::string key1 = _sys_meta_prefix_ + params["space"] + std::to_string(META_EDGE_1);
+    std::string key2 = _sys_meta_prefix_ + params["space"] + std::to_string(META_EDGE_2);
+
+    rocksdb::Slice startkey( key1 );
+    rocksdb::Slice endkey( key2 );
+
+    LOG(WARNING) << key1;
+    LOG(WARNING) << key2;
 
     rocksdb::ReadOptions scan_read_options;
     scan_read_options.fill_cache = false; // not fill cache
@@ -309,8 +342,11 @@ void Schedule::relationlist(struct evhttp_request *req)
         return ;
     }
 
-    nlohmann::json edge_objs = nlohmann::json::array();
+    nlohmann::json edge_objs;
+    nlohmann::json rank_objs;
     nlohmann::json tag_objs;
+    nlohmann::json relation_objs;
+    nlohmann::json node_objs;
 
     scan_it_->SeekToFirst();
     while(scan_it_->Valid()) {
@@ -320,41 +356,168 @@ void Schedule::relationlist(struct evhttp_request *req)
         std::vector<std::string> vec1 = tokenize(key.substr(startkey.size()), _sys_begin_tag_);
         std::vector<std::string> vec2 = tokenize(value, _sys_begin_tag_);
 
-        nlohmann::json obj;
-        obj["edge"] = vec1[0];
-        nlohmann::json obj_arr = nlohmann::json::array();
-        obj_arr.push_back(vec2[1]);
-        obj_arr.push_back(vec2[2]);
-        obj["tags"] = obj_arr;
-        obj["rank"] = atoi( vec2[0].c_str() );
-        obj["desc"] = vec2[1] + " -> " + vec2[2];
+        // {
+        //     std::string tag1 = vec2[1];
+        //     std::string tag2 = vec2[2];
 
-        edge_objs.push_back( obj );
+        //     std::string edge = vec1[0];
+        //     std::string rank = vec2[0];
+
+        //     if (rank_objs[rank].is_null()) {
+        //         nlohmann::json rank_obj;
+        //         // rank_obj[] = vec2[1];
+        //         nlohmann::json obj_arr = nlohmann::json::array();
+        //         obj_arr.push_back(tag1);
+        //         obj_arr.push_back(tag2);
+        //         rank_obj["tags"] = obj_arr;
+        //         rank_obj["desc"] = tag1 + " -> " + tag2;
+
+        //         rank_obj["edges"] = nlohmann::json::array();
+        //         rank_obj[tag1] = tag2;
+        //         rank_obj[tag2] = tag1;
+        //         rank_objs[rank] = rank_obj;
+        //     }
+
+        //     rank_objs[rank]["edges"].push_back( edge );
+        // }
 
         {
-            if (tag_objs[vec2[1]].is_null()) {
-                tag_objs[vec2[1]] = nlohmann::json::array();
+            std::string tag1 = vec2[1];
+            std::string tag2 = vec2[2];
+            std::string rank = vec2[0];
+            std::string edge = vec1[0];
+
+            if (rank_objs[tag1].is_null()) {
+                rank_objs[tag1] = nlohmann::json();
+            }
+            if (rank_objs[tag1][ rank ].is_null()) {
+                nlohmann::json tag_obj;
+                tag_obj["tag"] = tag2;
+                tag_obj["edges"] = nlohmann::json::array();
+                // tag_obj["direction"] = "->";
+
+                rank_objs[tag1][ rank ] = tag_obj;
             }
 
-            nlohmann::json tag_obj;
-            tag_obj["tag"] = vec2[2];
-            tag_obj["edge"] = vec1[0];
-            tag_obj["rank"] = atoi( vec2[0].c_str() );
-            tag_obj["direction"] = "->";
-            tag_objs[vec2[1]].push_back(tag_obj);
+            rank_objs[tag1][ rank ]["edges"].push_back( edge );
+
+            if (tag1 != tag2) {
+                if (rank_objs[tag2].is_null()) {
+                    rank_objs[tag2] = nlohmann::json();
+                }
+                if (rank_objs[tag2][ rank ].is_null()) {
+                    nlohmann::json tag_obj;
+                    tag_obj["tag"] = tag1;
+                    tag_obj["edges"] = nlohmann::json::array();
+                    // tag_obj["direction"] = "->";
+
+                    rank_objs[tag2][ rank ] = tag_obj;
+                }
+
+                rank_objs[tag2][ rank ]["edges"].push_back( edge );
+            }
+        }
+/*
+        if (vec2[1] != vec2[2]) {
+            // if (tag_objs[vec2[2]].is_null()) {
+            //     tag_objs[vec2[2]] = nlohmann::json::array();
+            // }
+
+            std::string tag = vec2[2];
+            std::string rank = vec2[0];
+            std::string edge = vec1[0];
+            // int32_t rank = atoi( vec2[0].c_str() );
+            if (tag_objs[tag].is_null()) {
+                tag_objs[tag] = nlohmann::json();
+            }
+            if (tag_objs[tag][ rank ].is_null()) {
+                nlohmann::json tag_obj;
+                tag_obj["tag"] = vec2[1];
+                tag_obj["edges"] = nlohmann::json::array();
+                // tag_obj["edge"] = vec1[0];
+                // tag_obj["rank"] = atoi( vec2[0].c_str() );
+                tag_obj["direction"] = "<-";
+                tag_objs[tag][ rank ] = tag_obj;
+            }
+
+            tag_objs[tag][ rank ]["edges"].push_back( edge );
+            // tag_objs[tag][ rank ][ edge ] = tag_obj;
+            // tag_objs[vec2[2]].push_back(tag_obj);
+        }
+*/
+        {
+            std::string tag1 = vec2[1];
+            std::string tag2 = vec2[2];
+            std::string rank = vec2[0];
+            std::string edge = vec1[0];
+
+            if (relation_objs[tag1].is_null()) {
+                relation_objs[tag1] = nlohmann::json();
+            }
+
+            if (relation_objs[tag1][edge].is_null()) {
+                relation_objs[tag1][edge] = nlohmann::json::array();
+            }
+
+            {
+                nlohmann::json tag_obj;
+                tag_obj["tag"] = tag2;
+                tag_obj["rank"] = rank;
+
+                relation_objs[tag1][edge].push_back( tag_obj );
+            }
+
+            if (tag1 != tag2) {
+                if (relation_objs[tag2].is_null()) {
+                    relation_objs[tag2] = nlohmann::json();
+                }
+                if (relation_objs[tag2][edge].is_null()) {
+                    relation_objs[tag2][edge] = nlohmann::json::array();
+                }
+
+                nlohmann::json tag_obj;
+                tag_obj["tag"] = tag1;
+                tag_obj["rank"] = rank;
+
+                relation_objs[tag2][ edge ].push_back( tag_obj );
+            }
         }
 
-        if (vec2[1] != vec2[2]) {
-            if (tag_objs[vec2[2]].is_null()) {
-                tag_objs[vec2[2]] = nlohmann::json::array();
+        {
+            std::string tag1 = vec2[1];
+            std::string tag2 = vec2[2];
+            std::string rank = vec2[0];
+            std::string edge = vec1[0];
+
+            if (tag_objs[tag1].is_null()) {
+                tag_objs[tag1] = nlohmann::json();
             }
 
-            nlohmann::json tag_obj;
-            tag_obj["tag"] = vec2[1];
-            tag_obj["edge"] = vec1[0];
-            tag_obj["rank"] = atoi( vec2[0].c_str() );
-            tag_obj["direction"] = "<-";
-            tag_objs[vec2[2]].push_back(tag_obj);
+            if (tag_objs[tag1][tag2].is_null()) {
+                tag_objs[tag1][tag2] = nlohmann::json::array();
+            }
+
+            {
+                nlohmann::json tag_obj;
+                tag_obj["rank"] = rank;
+                tag_obj["edges"] = edge;
+                tag_objs[tag1][tag2].push_back(tag_obj);
+            }
+
+            if (tag1 != tag2) {
+                if (tag_objs[tag2].is_null()) {
+                    tag_objs[tag2] = nlohmann::json();
+                }
+
+                if (tag_objs[tag2][tag1].is_null()) {
+                    tag_objs[tag2][tag1] = nlohmann::json::array();
+                }
+
+                nlohmann::json tag_obj;
+                tag_obj["rank"] = rank;
+                tag_obj["edges"] = edge;
+                tag_objs[tag2][tag1].push_back(tag_obj);
+            }
         }
 
         scan_it_->Next();
@@ -364,7 +527,9 @@ void Schedule::relationlist(struct evhttp_request *req)
     nlohmann::json resp_obj;
     resp_obj["code"] = 0;
     resp_obj["edges"] = edge_objs;
+    resp_obj["ranks"] = rank_objs;
     resp_obj["tags"] = tag_objs;
+    resp_obj["relations"] = relation_objs;
 
     AdminServer::http_ok(req, resp_obj.dump());
 }
@@ -608,6 +773,248 @@ void Schedule::hdfslist(struct evhttp_request *req)
     auto resp = cli.Get(path);
 
     AdminServer::http_ok(req, resp->body);
+}
+
+void Schedule::subgraphclear(struct evhttp_request *req)
+{
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+
+    if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
+        AdminServer::http_error(req, 400, "not a post request!");
+        return ;
+    }
+
+    nebula::ConnectionPool pool;
+    pool.init({"10.48.128.50:9669","10.48.40.231:9669","10.48.40.232:9669"}, nebula::Config{});
+
+    auto session = pool.getSession("root", "nebula");
+    if (!session.valid()) {
+        AdminServer::http_error(req, 400, "graph database login failed!");
+        return ;
+    }
+
+    std::string space = "subgraphdata";
+
+    {
+        auto result = session.execute("clear space " + space + ";");
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    session.release();
+
+    nlohmann::json resp_obj;
+    if (true) {
+        resp_obj["code"] = 0;
+    } else {
+        resp_obj["code"] = -1;
+    }
+
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+void Schedule::subgraphmeta(struct evhttp_request* req)
+{
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+
+    if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
+        AdminServer::http_error(req, 400, "not a post request!");
+        return ;
+    }
+
+    std::string content = AdminServer::read_content(req);
+    if (content.empty()) {
+        AdminServer::http_error(req, 400, "empty content in post request!");
+        return ;
+    }
+
+    LOG(WARNING) << content;
+
+    nlohmann::json json_obj;
+    if (!JsonParse(content, json_obj)) {
+        AdminServer::http_error(req, 400, "invalid json format!");
+        return ;
+    }
+
+    nebula::ConnectionPool pool;
+    pool.init({"10.48.128.50:9669","10.48.40.231:9669","10.48.40.232:9669"}, nebula::Config{});
+
+    auto session = pool.getSession("root", "nebula");
+    if (!session.valid()) {
+        AdminServer::http_error(req, 400, "graph database login failed!");
+        return ;
+    }
+
+    std::string space = json_obj.value("space", "subgraphdata");
+
+    {
+        auto result = session.execute("use " + space + ";");
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    {
+
+        std::string cmd = "CREATE TAG IF NOT EXISTS entities(type string, name string, properties string);";
+
+        LOG(WARNING) << cmd;
+
+        auto result = session.execute(cmd);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    for (auto obj : json_obj["relations"]) {
+
+        std::string cmd = "CREATE EDGE IF NOT EXISTS ";
+        std::string id = obj.value("id", "default");
+        std::string type = obj.value("type", "default");
+        std::string source_id = obj.value("source_id", "default");
+        std::string target_id = obj.value("target_id", "default");
+        std::string properties = "{}";
+        if (!obj["properties"].is_null()) {
+            properties = obj["properties"].dump();
+        }
+
+        cmd.append(type).append(" (id string, properties string);");
+
+        LOG(WARNING) << cmd;
+
+        auto result = session.execute(cmd);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    session.release();
+
+    nlohmann::json resp_obj;
+    if (true) {
+        resp_obj["code"] = 0;
+    } else {
+        resp_obj["code"] = -1;
+    }
+
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+void Schedule::subgraphdata(struct evhttp_request *req)
+{
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+
+    if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
+        AdminServer::http_error(req, 400, "not a post request!");
+        return ;
+    }
+
+    std::string content = AdminServer::read_content(req);
+    if (content.empty()) {
+        AdminServer::http_error(req, 400, "empty content in post request!");
+        return ;
+    }
+
+    LOG(WARNING) << content;
+
+    nlohmann::json json_obj;
+    if (!JsonParse(content, json_obj)) {
+        AdminServer::http_error(req, 400, "invalid json format!");
+        return ;
+    }
+
+    nebula::ConnectionPool pool;
+    pool.init({"10.48.128.50:9669","10.48.40.231:9669","10.48.40.232:9669"}, nebula::Config{});
+
+    auto session = pool.getSession("root", "nebula");
+    if (!session.valid()) {
+        AdminServer::http_error(req, 400, "graph database login failed!");
+        return ;
+    }
+
+    std::string space = json_obj.value("space", "subgraphdata");
+
+    {
+        auto result = session.execute("use " + space + "; CLEAR SPACE " + space + ";");
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    for (auto obj : json_obj["entities"]) {
+
+        std::string cmd = "INSERT VERTEX entities(type, name, properties) VALUES \"";
+        std::string id = obj.value("id", "default");
+        std::string type = obj.value("type", "default");
+        std::string name = obj.value("name", "default");
+        std::string properties = "{}";
+        if (!obj["properties"].is_null()) {
+            properties = obj["properties"].dump();
+        }
+
+        cmd.append(id).append("\"").append(" : (\"").append(type).append("\", \"").append(name).append("\", '")
+            .append(properties).append("' );");
+
+        LOG(WARNING) << cmd;
+
+        auto result = session.execute(cmd);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    for (auto obj : json_obj["relations"]) {
+
+        std::string id = obj.value("id", "default");
+        std::string type = obj.value("type", "default");
+        std::string source_id = obj.value("source_id", "default");
+        std::string target_id = obj.value("target_id", "default");
+        std::string properties = "{}";
+        if (!obj["properties"].is_null()) {
+            properties = obj["properties"].dump();
+        }
+
+        std::string cmd;
+        cmd.append("INSERT EDGE ").append(type).append(" (id, properties) VALUES ");
+        cmd.append("\"").append(source_id).append("\"->").append("\"").append(target_id).append("\"");
+        cmd.append(":(").append("\"").append(id).append("\", ").append("'").append(properties).append("');");
+
+        LOG(WARNING) << cmd;
+
+        auto result = session.execute(cmd);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            AdminServer::http_error(req, 400, msg);
+            return ;
+        }
+    }
+
+    session.release();
+
+    nlohmann::json resp_obj;
+    if (true) {
+        resp_obj["code"] = 0;
+    } else {
+        resp_obj["code"] = -1;
+    }
+
+    AdminServer::http_ok(req, resp_obj.dump());
 }
 
 bool Schedule::Initialize()

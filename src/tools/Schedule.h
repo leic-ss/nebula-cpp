@@ -69,6 +69,9 @@ private:
     void taskdelete(struct evhttp_request *req);
     void tasklist(struct evhttp_request *req);
     void hdfslist(struct evhttp_request *req);
+    void subgraphclear(struct evhttp_request *req);
+    void subgraphmeta(struct evhttp_request *req);
+    void subgraphdata(struct evhttp_request *req);
 
 private:
     rocksdb::DB* sysdb;
