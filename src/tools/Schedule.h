@@ -72,6 +72,10 @@ private:
     void subgraphclear(struct evhttp_request *req);
     void subgraphmeta(struct evhttp_request *req);
     void subgraphdata(struct evhttp_request *req);
+    void spacelatest(struct evhttp_request* req);
+    void spacelatest_test(struct evhttp_request* req);
+    void spaceregulardel(struct evhttp_request* req);
+    void spaceregulardel_test(struct evhttp_request* req);
 
 private:
     rocksdb::DB* sysdb;

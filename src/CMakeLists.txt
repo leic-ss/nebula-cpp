@@ -89,6 +89,8 @@ set(NEBULA_THIRD_PARTY_LIBRARIES
     ${libatomic_link_flags}
 )
 
+message(STATUS "LIBEVENT_PATH: " ${LIBEVENT_PATH}/lib/libevent.a)
+
 nebula_add_subdirectory(interface)
 
 nebula_add_library(

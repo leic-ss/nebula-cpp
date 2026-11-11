@@ -67,16 +67,18 @@ static const uint32_t META_TAG_1 = 2;
 static const uint32_t META_TAG_2 = 3;
 
 
-static uint64_t gGetCurrentUs()
-{
-    struct timeval tm;
-    gettimeofday(&tm, nullptr);
-    uint64_t cur = tm.tv_sec*((uint64_t)1000000) + tm.tv_usec;
-    return cur;
-}
+/*
+nebula问题：
+Artist -> singer -> Album
+Artist -> singer -> Song
 
-static std::string gTimeConvert(time_t ts)
-{
+1. 从1001的Artist出发，沿着 singer 的边查询到了ID=2001（这个是Song的ID，go from会过滤Artist、singer这两个条件，只会拿到目标ID，没法过滤目标节点的类型，因为目标节点可能在其他机器）
+2. 找到了ID=2001后，去查询Album（正好有个ID=2001的Album）
+3. 返回了ID=2001的Album
+*/
+
+static uint64_t gGetCurrentUs() {
+    struct timeval tm; rt(time_t ts) {
     struct tm * timeinfo = localtime ( &ts );
 
     int32_t Year = timeinfo->tm_year+1900;
@@ -98,8 +100,7 @@ static std::string gTimeConvert(time_t ts)
     return str;
 }
 
-static std::vector<std::string> tokenize(const std::string& src, const std::string& delim)
-{
+static std::vector<std::string> tokenize(const std::string& src, const std::string& delim) {
     std::vector<std::string> ret;
     size_t last = 0;
     size_t pos = src.find(delim, last);
@@ -128,8 +129,7 @@ static std::vector<std::string> tokenize(const std::string& src, const std::stri
 //     return str;
 // }
 
-void Schedule::register_http_callbacks()
-{
+void Schedule::register_http_callbacks() {
     adminserver.reg_handler("/api/v1/task/schedule", std::bind(&Schedule::taskschedule,
                             this,
                             std::placeholders::_1));
@@ -160,10 +160,21 @@ void Schedule::register_http_callbacks()
     adminserver.reg_handler("/api/v1/subgraph/newdata", std::bind(&Schedule::subgraphdata,
                             this,
                             std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/space/latest", std::bind(&Schedule::spacelatest,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/space/latest_test", std::bind(&Schedule::spacelatest_test,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/space/regulardel", std::bind(&Schedule::spaceregulardel,
+                            this,
+                            std::placeholders::_1));
+    adminserver.reg_handler("/api/v1/space/regulardel_test", std::bind(&Schedule::spaceregulardel_test,
+                            this,
+                            std::placeholders::_1));
 }
 
-bool Schedule::JsonParse(const std::string& json_str, nlohmann::json& json_obj)
-{
+bool Schedule::JsonParse(const std::string& json_str, nlohmann::json& json_obj) {
     bool success = true;
     try {
         json_obj = nlohmann::json::parse(json_str);
@@ -175,8 +186,7 @@ bool Schedule::JsonParse(const std::string& json_str, nlohmann::json& json_obj)
     return success;
 }
 
-Schedule::~Schedule()
-{
+Schedule::~Schedule() {
     for (auto thd : threads) {
         delete thd;
     }
@@ -184,8 +194,7 @@ Schedule::~Schedule()
     threads.clear();
 }
 
-void Schedule::taskschedule(struct evhttp_request *req)
-{
+void Schedule::taskschedule(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -210,6 +219,7 @@ void Schedule::taskschedule(struct evhttp_request *req)
     LOG(WARNING) << content;
 
     uint32_t taskid = json_obj["execRecord"].value("taskScheRecordId", 0);
+    std::string taskname = json_obj.value("taskName", "default_task");
 
     std::string task_status = json_obj.value("status", "SUCCESS");
     if (task_status == "FAILED") {
@@ -224,6 +234,7 @@ void Schedule::taskschedule(struct evhttp_request *req)
     obj["initial_time"] = gTimeConvert( gGetCurrentUs()/1000000 );
     obj["taskid"] = taskid;
     obj["state"] = "Initial";
+    obj["taskname"] = taskname;
 
     std::string db_value = obj.dump();
 
@@ -240,8 +251,7 @@ void Schedule::taskschedule(struct evhttp_request *req)
 }
 
 // {"srctag": "tag1", "dsttag": "tag2", "edges": ["edge1", "edge2"]}
-void Schedule::relationcreate(struct evhttp_request *req)
-{
+void Schedule::relationcreate(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -309,8 +319,7 @@ void Schedule::relationcreate(struct evhttp_request *req)
     AdminServer::http_error(req, 200, "relation create success!");
 }
 
-void Schedule::relationlist(struct evhttp_request *req)
-{
+void Schedule::relationlist(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -355,6 +364,19 @@ void Schedule::relationlist(struct evhttp_request *req)
 
         std::vector<std::string> vec1 = tokenize(key.substr(startkey.size()), _sys_begin_tag_);
         std::vector<std::string> vec2 = tokenize(value, _sys_begin_tag_);
+
+        {
+            nlohmann::json obj;
+            obj["edge"] = vec1[0];
+            nlohmann::json obj_arr = nlohmann::json::array();
+            obj_arr.push_back(vec2[1]);
+            obj_arr.push_back(vec2[2]);
+            obj["tags"] = obj_arr;
+            obj["rank"] = atoi( vec2[0].c_str() );
+            obj["desc"] = vec2[1] + " -> " + vec2[2];
+
+            edge_objs.push_back( obj );
+        }
 
         // {
         //     std::string tag1 = vec2[1];
@@ -534,8 +556,7 @@ void Schedule::relationlist(struct evhttp_request *req)
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-void Schedule::taskstatus(struct evhttp_request *req)
-{
+void Schedule::taskstatus(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -593,8 +614,7 @@ void Schedule::taskstatus(struct evhttp_request *req)
     AdminServer::http_ok(req, obj.dump());
 }
 
-void Schedule::tasklist(struct evhttp_request *req)
-{
+void Schedule::tasklist(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -675,8 +695,7 @@ void Schedule::tasklist(struct evhttp_request *req)
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-void Schedule::taskdelete(struct evhttp_request *req)
-{
+void Schedule::taskdelete(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -747,8 +766,7 @@ void Schedule::taskdelete(struct evhttp_request *req)
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-void Schedule::hdfslist(struct evhttp_request *req)
-{
+void Schedule::hdfslist(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
     // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
@@ -775,13 +793,20 @@ void Schedule::hdfslist(struct evhttp_request *req)
     AdminServer::http_ok(req, resp->body);
 }
 
-void Schedule::subgraphclear(struct evhttp_request *req)
-{
+void Schedule::subgraphclear(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
 
+    nlohmann::json resp_obj;
+    resp_obj["code"] = nebula::ErrorCode::SUCCEEDED;
+
     if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
-        AdminServer::http_error(req, 400, "not a post request!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "not a post request!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
@@ -791,6 +816,14 @@ void Schedule::subgraphclear(struct evhttp_request *req)
     auto session = pool.getSession("root", "nebula");
     if (!session.valid()) {
         AdminServer::http_error(req, 400, "graph database login failed!");
+
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "graph database login failed!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+
         return ;
     }
 
@@ -799,37 +832,55 @@ void Schedule::subgraphclear(struct evhttp_request *req)
     {
         auto result = session.execute("clear space " + space + ";");
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed! " + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
+
             return ;
         }
     }
 
     session.release();
 
-    nlohmann::json resp_obj;
-    if (true) {
-        resp_obj["code"] = 0;
-    } else {
-        resp_obj["code"] = -1;
-    }
-
+    resp_obj["msg"] = "exec success!";
+    LOG(WARNING) << resp_obj.dump();
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-void Schedule::subgraphmeta(struct evhttp_request* req)
-{
+void Schedule::subgraphmeta(struct evhttp_request* req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
 
+    nlohmann::json resp_obj;
+    resp_obj["code"] = nebula::ErrorCode::SUCCEEDED;
+
     if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
-        AdminServer::http_error(req, 400, "not a post request!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "not a post request!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
     std::string content = AdminServer::read_content(req);
     if (content.empty()) {
-        AdminServer::http_error(req, 400, "empty content in post request!");
+        // AdminServer::http_error(req, 400, "empty content in post request!");
+
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "empty content in post request!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+
         return ;
     }
 
@@ -837,7 +888,15 @@ void Schedule::subgraphmeta(struct evhttp_request* req)
 
     nlohmann::json json_obj;
     if (!JsonParse(content, json_obj)) {
-        AdminServer::http_error(req, 400, "invalid json format!");
+        // AdminServer::http_error(req, 400, "invalid json format!");
+
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "invalid json format!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+
         return ;
     }
 
@@ -846,7 +905,15 @@ void Schedule::subgraphmeta(struct evhttp_request* req)
 
     auto session = pool.getSession("root", "nebula");
     if (!session.valid()) {
-        AdminServer::http_error(req, 400, "graph database login failed!");
+        // AdminServer::http_error(req, 400, "graph database login failed!");
+
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "graph database login failed!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+
         return ;
     }
 
@@ -855,8 +922,15 @@ void Schedule::subgraphmeta(struct evhttp_request* req)
     {
         auto result = session.execute("use " + space + ";");
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed! " + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
+
             return ;
         }
     }
@@ -869,8 +943,14 @@ void Schedule::subgraphmeta(struct evhttp_request* req)
 
         auto result = session.execute(cmd);
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed! " + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
             return ;
         }
     }
@@ -893,37 +973,50 @@ void Schedule::subgraphmeta(struct evhttp_request* req)
 
         auto result = session.execute(cmd);
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed! " + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
             return ;
         }
     }
 
     session.release();
 
-    nlohmann::json resp_obj;
-    if (true) {
-        resp_obj["code"] = 0;
-    } else {
-        resp_obj["code"] = -1;
-    }
-
+    resp_obj["msg"] = "exec success!";
+    LOG(WARNING) << resp_obj.dump();
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-void Schedule::subgraphdata(struct evhttp_request *req)
-{
+void Schedule::subgraphdata(struct evhttp_request *req) {
     std::string mime_type("application/json; charset=utf-8");
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
 
+    nlohmann::json resp_obj;
+    resp_obj["code"] = nebula::ErrorCode::SUCCEEDED;
+
     if (req->type != evhttp_cmd_type::EVHTTP_REQ_POST) {
-        AdminServer::http_error(req, 400, "not a post request!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "not a post request!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
     std::string content = AdminServer::read_content(req);
     if (content.empty()) {
-        AdminServer::http_error(req, 400, "empty content in post request!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "empty content in post request!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
@@ -931,7 +1024,12 @@ void Schedule::subgraphdata(struct evhttp_request *req)
 
     nlohmann::json json_obj;
     if (!JsonParse(content, json_obj)) {
-        AdminServer::http_error(req, 400, "invalid json format!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "invalid json format!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
@@ -940,7 +1038,12 @@ void Schedule::subgraphdata(struct evhttp_request *req)
 
     auto session = pool.getSession("root", "nebula");
     if (!session.valid()) {
-        AdminServer::http_error(req, 400, "graph database login failed!");
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "graph database login failed!";
+        // AdminServer::http_error(req, 400, resp_obj.dump());
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
         return ;
     }
 
@@ -949,8 +1052,14 @@ void Schedule::subgraphdata(struct evhttp_request *req)
     {
         auto result = session.execute("use " + space + "; CLEAR SPACE " + space + ";");
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed!" + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
             return ;
         }
     }
@@ -973,8 +1082,14 @@ void Schedule::subgraphdata(struct evhttp_request *req)
 
         auto result = session.execute(cmd);
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed!" + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
             return ;
         }
     }
@@ -999,26 +1114,316 @@ void Schedule::subgraphdata(struct evhttp_request *req)
 
         auto result = session.execute(cmd);
         if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
-            std::string msg = "graph database exec " + cmd + " failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
-            AdminServer::http_error(req, 400, msg);
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "graph database exec failed! " + *result.errorMsg;
+
+            // std::string msg = "graph database exec failed! error code: " + std::to_string((int32_t)result.errorCode) + *result.errorMsg;
+            // AdminServer::http_error(req, 400, msg);
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
             return ;
         }
     }
 
     session.release();
 
-    nlohmann::json resp_obj;
-    if (true) {
-        resp_obj["code"] = 0;
-    } else {
-        resp_obj["code"] = -1;
+    resp_obj["msg"] = "exec success!";
+    LOG(WARNING) << resp_obj.dump();
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+void Schedule::spacelatest(struct evhttp_request *req) {
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    AdminServer::Http_Map params = AdminServer::parse_params(req);
+
+    std::string start_tag = std::to_string(JOB_STATE_INITIAL);
+    std::string end_tag = std::to_string(JOB_STATE_END);
+
+    rocksdb::Slice startkey( _sys_task_prefix_ + start_tag );
+    rocksdb::Slice endkey( _sys_task_prefix_ + end_tag );
+
+    rocksdb::ReadOptions scan_read_options;
+    scan_read_options.fill_cache = false; // not fill cache
+    scan_read_options.iterate_lower_bound = &startkey;
+    scan_read_options.iterate_upper_bound = &endkey;
+
+    rocksdb::Iterator* scan_it_ = sysdb->NewIterator(scan_read_options);
+    if (!scan_it_) {
+        LOG(ERROR) << "NewIterator failed!";
+        AdminServer::http_error(req, 400, "NewIterator failed!");
+        return ;
     }
+
+    nlohmann::json resp_obj;
+    nlohmann::json json_objs = nlohmann::json::array();
+
+    std::string latest_namespace;
+    scan_it_->SeekToFirst();
+    while(scan_it_->Valid()) {
+        // std::string key(scan_it_->key().data(), scan_it_->key().size());
+        std::string value( scan_it_->value().data(), scan_it_->value().size() );
+
+        nlohmann::json obj;
+        JsonParse(value, obj);
+
+        std::string taskname = obj.value("taskname", "default");
+        std::string spacename = obj.value("spacename", "");
+        std::string taskstatus = obj.value("state", "default");
+        if (taskname == "nebula_write-v3" && taskstatus == "Done") {
+            if ( latest_namespace.empty() ) latest_namespace = spacename;
+            if (latest_namespace < spacename) latest_namespace = spacename;
+        }
+
+        scan_it_->Next();
+    }
+    delete scan_it_;
+
+    resp_obj["code"] = 0;
+    resp_obj["latest_namespace"] = latest_namespace;
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+void Schedule::spacelatest_test(struct evhttp_request *req) {
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    AdminServer::Http_Map params = AdminServer::parse_params(req);
+
+    std::string start_tag = std::to_string(JOB_STATE_INITIAL);
+    std::string end_tag = std::to_string(JOB_STATE_END);
+
+    rocksdb::Slice startkey( _sys_task_prefix_ + start_tag );
+    rocksdb::Slice endkey( _sys_task_prefix_ + end_tag );
+
+    rocksdb::ReadOptions scan_read_options;
+    scan_read_options.fill_cache = false; // not fill cache
+    scan_read_options.iterate_lower_bound = &startkey;
+    scan_read_options.iterate_upper_bound = &endkey;
+
+    rocksdb::Iterator* scan_it_ = sysdb->NewIterator(scan_read_options);
+    if (!scan_it_) {
+        LOG(ERROR) << "NewIterator failed!";
+        AdminServer::http_error(req, 400, "NewIterator failed!");
+        return ;
+    }
+
+    nlohmann::json resp_obj;
+    nlohmann::json json_objs = nlohmann::json::array();
+
+    std::string latest_namespace;
+    scan_it_->SeekToFirst();
+    while(scan_it_->Valid()) {
+        // std::string key(scan_it_->key().data(), scan_it_->key().size());
+        std::string value( scan_it_->value().data(), scan_it_->value().size() );
+
+        nlohmann::json obj;
+        JsonParse(value, obj);
+
+        std::string taskname = obj.value("taskname", "default");
+        std::string spacename = obj.value("spacename", "");
+        std::string taskstatus = obj.value("state", "default");
+        if (taskname == "nebula_write-v3-test" && taskstatus == "Done") {
+            if ( latest_namespace.empty() ) latest_namespace = spacename;
+            if (latest_namespace < spacename) latest_namespace = spacename;
+        }
+
+        scan_it_->Next();
+    }
+    delete scan_it_;
+
+    resp_obj["code"] = 0;
+    resp_obj["latest_namespace"] = latest_namespace;
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+void Schedule::spaceregulardel(struct evhttp_request* req) {
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    AdminServer::Http_Map params = AdminServer::parse_params(req);
+
+    std::string start_tag = std::to_string(JOB_STATE_INITIAL);
+    std::string end_tag = std::to_string(JOB_STATE_END);
+
+    rocksdb::Slice startkey( _sys_task_prefix_ + start_tag );
+    rocksdb::Slice endkey( _sys_task_prefix_ + end_tag );
+
+    rocksdb::ReadOptions scan_read_options;
+    scan_read_options.fill_cache = false; // not fill cache
+    scan_read_options.iterate_lower_bound = &startkey;
+    scan_read_options.iterate_upper_bound = &endkey;
+
+    rocksdb::Iterator* scan_it_ = sysdb->NewIterator(scan_read_options);
+    if (!scan_it_) {
+        LOG(ERROR) << "NewIterator failed!";
+        AdminServer::http_error(req, 400, "NewIterator failed!");
+        return ;
+    }
+
+    nlohmann::json resp_obj;
+    nlohmann::json json_objs = nlohmann::json::array();
+
+    std::set<std::string> namespaces;
+    scan_it_->SeekToFirst();
+    while(scan_it_->Valid()) {
+        std::string value( scan_it_->value().data(), scan_it_->value().size() );
+
+        nlohmann::json obj;
+        JsonParse(value, obj);
+
+        std::string taskname = obj.value("taskname", "");
+        std::string spacename = obj.value("spacename", "");
+        std::string taskstatus = obj.value("state", "");
+        if (taskname == "nebula_write-v3" && taskstatus == "Done") {
+            namespaces.insert(spacename);
+        }
+
+        scan_it_->Next();
+    }
+    delete scan_it_;
+
+    nebula::ConnectionPool pool;
+    pool.init({"10.48.128.50:9669","10.48.40.231:9669","10.48.40.232:9669"}, nebula::Config{});
+
+    auto session = pool.getSession("root", "nebula");
+    if (!session.valid()) {
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "graph database login failed!";
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+        return ;
+    }
+
+    std::vector<std::string> cur_namespaces;
+    std::vector<std::string> del_namespaces;
+    while (namespaces.size() > 2) {
+        auto iter = namespaces.begin();
+        auto result = session.execute("DROP SPACE IF EXISTS " + *iter);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "drop space " + *iter + " failed!" + *result.errorMsg;
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
+            return ;
+        }
+
+        del_namespaces.push_back( *iter );
+        namespaces.erase( iter );
+    }
+
+    session.release();
+
+    for (auto& ele : namespaces) {
+        cur_namespaces.push_back( ele );
+    }
+
+    resp_obj["code"] = 0;
+    resp_obj["cur_namespaces"] = cur_namespaces;
+    resp_obj["del_namespaces"] = del_namespaces;
 
     AdminServer::http_ok(req, resp_obj.dump());
 }
 
-bool Schedule::Initialize()
-{
+void Schedule::spaceregulardel_test(struct evhttp_request* req) {
+    std::string mime_type("application/json; charset=utf-8");
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", mime_type.c_str());
+    // evhttp_add_header(evhttp_request_get_output_headers(req), mime_type.c_str(), "1");
+
+    AdminServer::Http_Map params = AdminServer::parse_params(req);
+
+    std::string start_tag = std::to_string(JOB_STATE_INITIAL);
+    std::string end_tag = std::to_string(JOB_STATE_END);
+
+    rocksdb::Slice startkey( _sys_task_prefix_ + start_tag );
+    rocksdb::Slice endkey( _sys_task_prefix_ + end_tag );
+
+    rocksdb::ReadOptions scan_read_options;
+    scan_read_options.fill_cache = false; // not fill cache
+    scan_read_options.iterate_lower_bound = &startkey;
+    scan_read_options.iterate_upper_bound = &endkey;
+
+    rocksdb::Iterator* scan_it_ = sysdb->NewIterator(scan_read_options);
+    if (!scan_it_) {
+        LOG(ERROR) << "NewIterator failed!";
+        AdminServer::http_error(req, 400, "NewIterator failed!");
+        return ;
+    }
+
+    nlohmann::json resp_obj;
+    nlohmann::json json_objs = nlohmann::json::array();
+
+    std::set<std::string> namespaces;
+    scan_it_->SeekToFirst();
+    while(scan_it_->Valid()) {
+        std::string value( scan_it_->value().data(), scan_it_->value().size() );
+
+        nlohmann::json obj;
+        JsonParse(value, obj);
+
+        std::string taskname = obj.value("taskname", "");
+        std::string spacename = obj.value("spacename", "");
+        std::string taskstatus = obj.value("state", "");
+        if (taskname == "nebula_write-v3-test" && taskstatus == "Done") {
+            namespaces.insert(spacename);
+        }
+
+        scan_it_->Next();
+    }
+    delete scan_it_;
+
+    nebula::ConnectionPool pool;
+    pool.init({"10.48.128.50:9669","10.48.40.231:9669","10.48.40.232:9669"}, nebula::Config{});
+
+    auto session = pool.getSession("root", "nebula");
+    if (!session.valid()) {
+        resp_obj["code"] = -1;
+        resp_obj["msg"] = "graph database login failed!";
+
+        AdminServer::http_ok(req, resp_obj.dump());
+        LOG(WARNING) << resp_obj.dump();
+        return ;
+    }
+
+    std::vector<std::string> cur_namespaces;
+    std::vector<std::string> del_namespaces;
+    while (namespaces.size() > 2) {
+        auto iter = namespaces.begin();
+        auto result = session.execute("DROP SPACE IF EXISTS " + *iter);
+        if (result.errorCode != nebula::ErrorCode::SUCCEEDED) {
+            resp_obj["code"] = result.errorCode;
+            resp_obj["msg"] = "drop space " + *iter + " failed!" + *result.errorMsg;
+
+            AdminServer::http_ok(req, resp_obj.dump());
+            LOG(WARNING) << resp_obj.dump();
+            return ;
+        }
+
+        del_namespaces.push_back( *iter );
+        namespaces.erase( iter );
+    }
+
+    session.release();
+
+    for (auto& ele : namespaces) {
+        cur_namespaces.push_back( ele );
+    }
+
+    resp_obj["code"] = 0;
+    resp_obj["cur_namespaces"] = cur_namespaces;
+    resp_obj["del_namespaces"] = del_namespaces;
+
+    AdminServer::http_ok(req, resp_obj.dump());
+}
+
+bool Schedule::Initialize() {
     register_http_callbacks();
 
     std::vector<rocksdb::ColumnFamilyDescriptor> cfdescs;
@@ -1057,8 +1462,7 @@ bool Schedule::Initialize()
     return true;
 }
 
-std::string Schedule::pickInitialJob()
-{
+std::string Schedule::pickInitialJob() {
     std::string jobid;
 
     rocksdb::Slice startkey(_sys_task_prefix_ + std::to_string(JOB_STATE_INITIAL) );
@@ -1090,8 +1494,7 @@ std::string Schedule::pickInitialJob()
     return jobkey.substr(startkey.size());
 }
 
-std::string Schedule::pickRunningJob()
-{
+std::string Schedule::pickRunningJob() {
     std::string jobid;
 
     rocksdb::Slice startkey(_sys_task_prefix_ + std::to_string(JOB_STATE_RUNNING) );
@@ -1122,8 +1525,7 @@ std::string Schedule::pickRunningJob()
     return jobkey.substr(startkey.size());
 }
 
-void Schedule::incrSucc(const std::string& jobid, std::string spacename, uint32_t count)
-{
+void Schedule::incrSucc(const std::string& jobid, std::string spacename, uint32_t count) {
     std::unique_lock<std::mutex> lk(mtx);
 
     auto iter1 = jobStatus.find(jobid);
@@ -1176,8 +1578,7 @@ void Schedule::incrSucc(const std::string& jobid, std::string spacename, uint32_
     }
 }
 
-void Schedule::incrFail(const std::string& jobid, std::string spacename, uint32_t count)
-{
+void Schedule::incrFail(const std::string& jobid, std::string spacename, uint32_t count) {
     std::unique_lock<std::mutex> lk(mtx);
 
     auto iter1 = jobStatus.find(jobid);
@@ -1230,8 +1631,7 @@ void Schedule::incrFail(const std::string& jobid, std::string spacename, uint32_
     }
 }
 
-void Schedule::incrTotal(const std::string& jobid, std::string spacename, uint32_t count)
-{
+void Schedule::incrTotal(const std::string& jobid, std::string spacename, uint32_t count) {
     std::unique_lock<std::mutex> lk(mtx);
 
     auto iter1 = jobStatus.find(jobid);
@@ -1248,8 +1648,7 @@ void Schedule::incrTotal(const std::string& jobid, std::string spacename, uint32
     }
 }
 
-bool Schedule::scheduleJob(const std::string& jobid)
-{
+bool Schedule::scheduleJob(const std::string& jobid) {
     std::vector<std::string> storage_http_addrs;
     folly::split(",", FLAGS_storage_http_addrs, storage_http_addrs, true);
     if (storage_http_addrs.empty()) {
@@ -1306,6 +1705,25 @@ bool Schedule::scheduleJob(const std::string& jobid)
     for (std::string spacedir : resp_obj["dirs"]) {
 
         std::string spacename = spacedir.substr(spacedir.find_last_of('/') + 1);
+
+        std::string value;
+        std::string newkey = _sys_task_prefix_ + std::to_string(JOB_STATE_RUNNING) + jobid;
+        rocksdb::Status status = sysdb->Get(rocksdb::ReadOptions(), newkey, &value);
+        if ( status.ok() ) {
+            nlohmann::json obj2;
+            JsonParse(value, obj2);
+
+            obj2["spacename"] = spacename;
+            obj2["ingest_time"] = gTimeConvert( gGetCurrentUs()/1000000 );
+
+            // rocksdb::WriteBatch batch;
+            // batch.Put(newkey, obj2.dump());
+            LOG(WARNING) << newkey << " : " << obj2.dump();
+
+            // status = sysdb->Write(rocksdb::WriteOptions(), &batch);
+            status = sysdb->Put(rocksdb::WriteOptions(), newkey, obj2.dump());
+        }
+
         auto ret = mclient.getSpaceIdByNameFromCache(spacename);
         LOG(WARNING) << "space: " << spacename << " " << ret.first << " : " << ret.second;
 
@@ -1386,8 +1804,7 @@ bool Schedule::scheduleJob(const std::string& jobid)
     return true;
 }
 
-void Schedule::ingestFiles(JobTask task)
-{
+void Schedule::ingestFiles(JobTask task) {
     std::string storage_addrs = task.hostitem.get_hostAddr().host + ":" + std::to_string(task.hostitem.get_hostAddr().port + 10000);
     httplib::Client client(storage_addrs);
 
@@ -1463,8 +1880,7 @@ void Schedule::ingestFiles(JobTask task)
     }
 }
 
-void Schedule::Run()
-{
+void Schedule::Run() {
 
     while (true) {
 
@@ -1507,11 +1923,9 @@ void Schedule::Run()
 
             bool ret = scheduleJob( jobid );
 
-            rocksdb::WriteBatch batch2;
-
-            obj["ingest_time"] = gTimeConvert( gGetCurrentUs()/1000000 );;
-
             if (!ret) {
+                rocksdb::WriteBatch batch2;
+
                 oldkey = newkey;
                 batch2.Delete(oldkey);
 
@@ -1521,40 +1935,37 @@ void Schedule::Run()
                 obj["succ"] = 0;
                 obj["fail"] = 0;
                 obj["total"] = 0;
-                obj["state"] = "Done";
+                obj["state"] = "Failed";
+
+                batch2.Put(newkey, obj.dump());
+
+                status = sysdb->Write(rocksdb::WriteOptions(), &batch2);
+
+                if (!status.ok()) break;
             }
-
-            batch2.Put(newkey, obj.dump());
-
-            status = sysdb->Write(rocksdb::WriteOptions(), &batch2);
-
-            if (!status.ok()) break;
+            
         } while (false);
     }
 
 }
 
-void Schedule::Start()
-{
+void Schedule::Start() {
     workerthd = std::thread(&Schedule::Run, this);
 
     adminserver.start();
 }
 
-void Schedule::Wait()
-{
+void Schedule::Wait() {
     workerthd.join();
 
     adminserver.wait();
 }
 
-void Schedule::Stop()
-{
+void Schedule::Stop() {
     adminserver.stop();
 }
 
-int32_t main(int argc, char *argv[])
-{
+int32_t main(int argc, char *argv[]) {
     // google::SetVersionString(nebula::versionString());
     google::SetUsageMessage("Usage: " + std::string(argv[0]) + " [options]");
     google::SetStderrLogging(google::INFO);

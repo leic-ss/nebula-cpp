@@ -8,6 +8,8 @@ add_executable(MetaClientDemo
     MetaClientDemo.cpp
 )
 
+message(STATUS "LIBEVENT_PATH: " ${LIBEVENT_PATH}/lib/libevent.a)
+
 target_link_libraries(MetaClientDemo
         ${NEBULA_MCLIENT_OBJS}
         $<TARGET_OBJECTS:graph_thrift_obj>
